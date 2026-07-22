@@ -11,5 +11,4 @@ pyjwt
 scikit-learn
 joblib
 deepface
-tf-keras
 pandas
