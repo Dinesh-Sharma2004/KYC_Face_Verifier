@@ -43,10 +43,7 @@ jobs:
         run: |
           cd frontend
           npm run build
-<<<<<<< HEAD
           cp dist/index.html dist/404.html
-=======
->>>>>>> origin/gh-pages
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
