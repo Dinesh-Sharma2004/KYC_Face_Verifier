@@ -116,8 +116,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-event_subscribers: Dict[str, List[asyncio.Queue]] = {}
+import redis
 
+redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+redis_conn = redis.Redis.from_url(redis_url, socket_keepalive=True, retry_on_timeout=True)
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
@@ -308,11 +310,13 @@ class DocumentResponse(BaseModel):
     sha256: str
 
 
-def notify_job_subscribers(job_id: str, event_data: Dict[str, Any]):
-    subscribers = event_subscribers.get(job_id, [])
-    safe_event_data = sanitize_sse_event(event_data)
-    for queue in subscribers:
-        queue.put_nowait(safe_event_data)
+
+def publish_job_event(job_id: str, event_data: Dict[str, Any]):
+    try:
+        safe_event_data = sanitize_sse_event(event_data)
+        redis_conn.publish(f"job_events:{job_id}", json.dumps(safe_event_data))
+    except Exception as e:
+        logger.error(f"Failed to publish job event to Redis: {e}")
 
 
 @app.get("/health")
@@ -331,8 +335,6 @@ def health_check(db: Session = Depends(get_db)):
         
     # Check Redis
     try:
-        from redis import Redis
-        redis_conn = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
         if redis_conn.ping():
             details["redis"] = "connected"
         else:
@@ -354,7 +356,7 @@ def health_check(db: Session = Depends(get_db)):
 @app.get("/metrics")
 def metrics():
     return {
-        "active_sse_connections": sum(len(qs) for qs in event_subscribers.values()),
+        "active_sse_connections": "migrated_to_redis",
         "ensemble_models": ["ArcFace", "FaceNet512", "Buffalo_L"],
         "uptime_seconds": 3600,
     }
@@ -472,7 +474,7 @@ async def upload_document(
     db.add(evt)
     db.commit()
 
-    notify_job_subscribers(
+    publish_job_event(
         job_id,
         {
             "event_type": "document.uploaded",
@@ -493,152 +495,6 @@ async def upload_document(
     )
 
 
-def run_async_verification_pipeline(job_id_str: str, current_user_id_str: str):
-    """Forensic 3-Model Ensemble (ArcFace + FaceNet512 + Buffalo_L) Verification Pipeline."""
-    from ai_platform.db.session import SessionLocal
-
-    db = SessionLocal()
-    try:
-        job_uuid = uuid.UUID(job_id_str)
-        job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid, VerificationJob.user_id == current_user_id).first()
-        if not job:
-            return
-
-        job.status = JobStatus.FACE_VERIFICATION
-        db.commit()
-        notify_job_subscribers(job_id_str, {"event_type": "face.started", "status": "face_verification"})
-
-        docs = db.query(Document).filter(Document.job_id == job.id, Document.user_id == current_user_id).all()
-        primary_bytes = None
-        secondary_bytes = None
-
-        for doc in docs:
-            doc_bytes = doc.file_content
-            if doc.role == DocumentRole.PRIMARY:
-                primary_bytes = doc_bytes
-            else:
-                secondary_bytes = doc_bytes
-
-        face_report = perform_face_verification(primary_bytes or b"", secondary_bytes)
-
-        verdict_str = face_report["ensemble_verdict"]
-        similarity_score = face_report["similarity"]
-        distance = face_report["ensemble_distance"]
-        faces_count = face_report["faces_detected"]
-        p_bbox = face_report["primary_bbox"]
-
-        if verdict_str == "MATCH":
-            decision = VerificationDecision.VERIFIED
-        elif verdict_str == "REVIEW_REQUIRED":
-            decision = VerificationDecision.REVIEW_REQUIRED
-        else:
-            decision = VerificationDecision.REJECTED
-
-        primary_doc = [d for d in docs if d.role == DocumentRole.PRIMARY]
-        primary_doc_id = primary_doc[0].id if primary_doc else docs[0].id
-
-        face_res = FaceResult(user_id=uuid.UUID(current_user_id_str), 
-            job_id=job.id,
-            primary_document_id=primary_doc_id,
-            status="completed" if faces_count > 0 else "no_face",
-            faces_detected_count=faces_count,
-            match_verdict=verdict_str,
-            similarity_score=similarity_score / 100.0,
-            confidence_score=face_report["match_confidence"] / 100.0 if verdict_str == "MATCH" else face_report["mismatch_confidence"] / 100.0,
-            face_bbox=p_bbox,
-        )
-        db.add(face_res)
-
-        field_matches = {
-            "face_verification": face_report,
-            "final_verification": {
-                "score": similarity_score,
-                "verdict": verdict_str,
-            },
-        }
-
-        report_json = {
-            "verdict": verdict_str,
-            "verification_score": similarity_score,
-            "match_confidence": face_report["match_confidence"],
-            "mismatch_confidence": face_report["mismatch_confidence"],
-            "model_disagreement": face_report["model_disagreement"],
-            "quality_score": face_report["quality_score"],
-            "face_verification": face_report,
-            "verified_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        verif_res = VerificationResult(user_id=uuid.UUID(current_user_id_str), 
-            job_id=job.id,
-            decision=decision,
-            overall_score=similarity_score / 100.0,
-            face_match_score=similarity_score / 100.0,
-            field_matches=field_matches,
-            report_json=report_json,
-        )
-        db.add(verif_res)
-
-        score_rec = VerificationScore(user_id=uuid.UUID(current_user_id_str), 
-            job_id=job.id,
-            verdict=verdict_str,
-            final_score=similarity_score,
-            breakdown=field_matches,
-        )
-        db.add(score_rec)
-
-        job.status = JobStatus.COMPLETED
-        job.completed_at = datetime.now(timezone.utc)
-
-        audit_comp = AuditLog(user_id=uuid.UUID(current_user_id_str), 
-            action="FORENSIC_FACE_VERIFICATION_COMPLETED",
-            resource_type="verification_job",
-            resource_id=job_id_str,
-            payload={
-                "arcface_distance": face_report.get("arcface_distance", 1.0),
-                "facenet_distance": face_report.get("facenet_distance", 1.0),
-                "buffalo_distance": face_report.get("buffalo_distance", 1.0),
-                "ensemble_distance": face_report.get("ensemble_distance", 1.0),
-                "arcface_verdict": face_report.get("arcface_verdict", "MISMATCH"),
-                "facenet_verdict": face_report.get("facenet_verdict", "MISMATCH"),
-                "buffalo_verdict": face_report.get("buffalo_verdict", "MISMATCH"),
-                "ensemble_verdict": face_report.get("ensemble_verdict", "MISMATCH"),
-                "match_confidence": face_report.get("match_confidence", 0.0),
-                "mismatch_confidence": face_report.get("mismatch_confidence", 100.0),
-                "model_disagreement": face_report.get("model_disagreement", False),
-                "quality_score": face_report.get("quality_score", 0.0),
-                "self_similarity_passed": face_report.get("self_similarity_check", {}).get("passed", True),
-            },
-        )
-        db.add(audit_comp)
-        db.commit()
-
-        # Privacy & Security Directive: Automatically delete uploaded document image files after verification
-        try:
-            # Files are stored as DB blobs, no external storage cleanup required in simplified architecture.
-            pass
-        except Exception as cleanup_ex:
-            logger.warning("Non-fatal document image cleanup warning for job %s: %s", job_id_str, str(cleanup_ex))
-
-        notify_job_subscribers(
-            job_id_str,
-            {
-                "event_type": "report.generated",
-                "status": "completed",
-                "decision": decision.value,
-                "overall_score": similarity_score,
-            },
-        )
-    except Exception as e:
-        logger.error("Async face verification pipeline failed for job %s: %s", job_id_str, str(e))
-        job.status = JobStatus.FAILED
-        job.status_reason = str(e)
-        db.commit()
-        notify_job_subscribers(job_id_str, {"event_type": "verification.failed", "status": "failed", "error": str(e)})
-    finally:
-        db.close()
-
-
-@app.post("/api/v1/jobs/{job_id}/process")
 def trigger_job_processing(
     job_id: str,
     request: Request,
@@ -828,31 +684,37 @@ async def sse_event_stream(job_id: str, request: Request, db: Session = Depends(
         raise HTTPException(status_code=400, detail="Invalid job UUID")
 
     require_job_access(job_id, request)
-
     job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid, VerificationJob.user_id == current_user_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    queue: asyncio.Queue = asyncio.Queue()
-    if job_id not in event_subscribers:
-        event_subscribers[job_id] = []
-    event_subscribers[job_id].append(queue)
+    import redis.asyncio as redis_async
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    async_redis = redis_async.from_url(redis_url, socket_keepalive=True, retry_on_timeout=True)
+    pubsub = async_redis.pubsub()
 
     async def event_generator():
         try:
+            await pubsub.subscribe(f"job_events:{job_id}")
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    data = await asyncio.wait_for(queue.get(), timeout=15.0)
-                    yield f"data: {json.dumps(data)}\n\n"
+                    message = await asyncio.wait_for(pubsub.get_message(ignore_subscribe_messages=True), timeout=15.0)
+                    if message and message["type"] == "message":
+                        yield f"data: {message['data'].decode('utf-8')}\\n\\n"
                 except asyncio.TimeoutError:
-                    yield f": heartbeat\n\n"
+                    yield ": heartbeat\\n\\n"
+                except Exception as e:
+                    logger.error(f"SSE error: {e}")
+                    break
         finally:
-            if job_id in event_subscribers and queue in event_subscribers[job_id]:
-                event_subscribers[job_id].remove(queue)
+            await pubsub.unsubscribe(f"job_events:{job_id}")
+            await pubsub.close()
+            await async_redis.aclose()
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
 
 
 @app.get("/api/v1/audit/logs")
