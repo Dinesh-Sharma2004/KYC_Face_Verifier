@@ -1,0 +1,17 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-950 text-slate-100 antialiased font-sans min-h-screen border-slate-800;
+  }
+}
+
+.glass-panel {
+  @apply bg-slate-900/60 backdrop-blur-md border border-slate-800/80 shadow-xl rounded-xl;
+}
+
+.glass-button {
+  @apply bg-indigo-600 hover:bg-indigo-500 text-white font-medium px-4 py-2 rounded-lg transition-all shadow-lg shadow-indigo-600/20 active:scale-95 disabled:opacity-50 disabled:pointer-events-none;
+}

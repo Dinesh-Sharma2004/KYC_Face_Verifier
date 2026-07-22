@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+pydantic
+sqlalchemy
+psycopg2-binary
+redis
+opencv-python-headless
+python-multipart
+httpx
+pyjwt
+scikit-learn
+joblib
+deepface
+tf-keras
+pandas

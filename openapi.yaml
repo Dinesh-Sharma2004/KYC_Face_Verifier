@@ -1,0 +1,476 @@
+openapi: 3.1.0
+info:
+  title: KYC Document Verification Platform API
+  version: 1.0.0
+  description: Production target API for asynchronous KYC document verification.
+servers:
+  - url: http://localhost:8000
+    description: Local gateway
+security:
+  - bearerAuth: []
+tags:
+  - name: Auth
+  - name: Jobs
+  - name: Documents
+  - name: Results
+  - name: Audit
+  - name: Health
+paths:
+  /health:
+    get:
+      tags: [Health]
+      security: []
+      summary: Service health check
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+  /v1/auth/login:
+    post:
+      tags: [Auth]
+      security: []
+      summary: Login and receive a JWT
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Authenticated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          $ref: "#/components/responses/Error"
+  /v1/jobs:
+    post:
+      tags: [Jobs]
+      summary: Create a verification job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateJobRequest"
+      responses:
+        "201":
+          description: Job created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+    get:
+      tags: [Jobs]
+      summary: List verification jobs
+      parameters:
+        - in: query
+          name: status
+          schema:
+            $ref: "#/components/schemas/JobStatus"
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+      responses:
+        "200":
+          description: Jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/JobResponse"
+  /v1/jobs/{job_id}:
+    get:
+      tags: [Jobs]
+      summary: Get a verification job
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobResponse"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/jobs/{job_id}/primary-document:
+    post:
+      tags: [Documents]
+      summary: Upload the primary KYC document
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                document_type_hint:
+                  type: string
+                  example: AADHAAR_CARD
+      responses:
+        "201":
+          description: Uploaded document metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DocumentResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+  /v1/jobs/{job_id}/supporting-documents:
+    post:
+      tags: [Documents]
+      summary: Upload supporting documents
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [files]
+              properties:
+                files:
+                  type: array
+                  items:
+                    type: string
+                    format: binary
+                metadata:
+                  type: string
+                  description: JSON array with filename-level metadata
+      responses:
+        "201":
+          description: Uploaded documents
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/DocumentResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "413":
+          $ref: "#/components/responses/Error"
+  /v1/jobs/{job_id}/events:
+    get:
+      tags: [Jobs]
+      summary: Stream job processing status with Server-Sent Events
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - in: query
+          name: after_sequence
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /v1/jobs/{job_id}/results:
+    get:
+      tags: [Results]
+      summary: Get verification result
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VerificationResult"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/jobs/{job_id}/report:
+    get:
+      tags: [Results]
+      summary: Download verification report metadata or artifact URL
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Report
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReportResponse"
+        "404":
+          $ref: "#/components/responses/Error"
+  /v1/audit:
+    get:
+      tags: [Audit]
+      summary: List audit records
+      parameters:
+        - in: query
+          name: job_id
+          schema:
+            type: string
+            format: uuid
+        - in: query
+          name: limit
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+      responses:
+        "200":
+          description: Audit records
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditLog"
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    JobId:
+      in: path
+      name: job_id
+      required: true
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      in: header
+      name: Idempotency-Key
+      required: false
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+  responses:
+    Error:
+      description: Error response
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+  schemas:
+    HealthResponse:
+      type: object
+      required: [status, service, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        service:
+          type: string
+        version:
+          type: string
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+    LoginResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          enum: [bearer]
+        expires_in:
+          type: integer
+    CreateJobRequest:
+      type: object
+      properties:
+        external_reference:
+          type: string
+        subject:
+          type: object
+          properties:
+            expected_name:
+              type: string
+            expected_date_of_birth:
+              type: string
+              format: date
+            expected_address:
+              type: string
+    JobStatus:
+      type: string
+      enum:
+        - queued
+        - processing
+        - ocr_running
+        - face_verification
+        - matching
+        - completed
+        - failed
+        - cancelled
+    JobResponse:
+      type: object
+      required: [id, status, trace_id, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          $ref: "#/components/schemas/JobStatus"
+        status_reason:
+          type: string
+          nullable: true
+        trace_id:
+          type: string
+          format: uuid
+        external_reference:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    DocumentResponse:
+      type: object
+      required: [id, job_id, role, original_filename, content_type, size_bytes, sha256]
+      properties:
+        id:
+          type: string
+          format: uuid
+        job_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [primary, supporting]
+        document_type_hint:
+          type: string
+          nullable: true
+        detected_document_type:
+          type: string
+          nullable: true
+        original_filename:
+          type: string
+        content_type:
+          type: string
+        size_bytes:
+          type: integer
+        sha256:
+          type: string
+    VerificationResult:
+      type: object
+      required: [job_id, decision, score, threshold, checks]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        decision:
+          type: string
+          enum: [verified, review_required, rejected, failed]
+        score:
+          type: number
+          minimum: 0
+          maximum: 100
+        threshold:
+          type: number
+        checks:
+          type: object
+          additionalProperties: true
+        matched_entities:
+          type: object
+          additionalProperties: true
+    ReportResponse:
+      type: object
+      required: [job_id, report_id, generated_at]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        report_id:
+          type: string
+          format: uuid
+        download_url:
+          type: string
+          format: uri
+          nullable: true
+        generated_at:
+          type: string
+          format: date-time
+    AuditLog:
+      type: object
+      required: [id, action, resource_type, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+          format: uuid
+          nullable: true
+        details:
+          type: object
+          additionalProperties: true
+        created_at:
+          type: string
+          format: date-time
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              type: object
+              additionalProperties: true

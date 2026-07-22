@@ -1,0 +1,66 @@
+version: "3.9"
+
+services:
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: prefect
+      POSTGRES_PASSWORD: prefect
+      POSTGRES_DB: credit_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - platform_pgdata:/var/lib/postgresql/data
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    environment:
+      REDIS_ADDR: redis://redis:6379
+    ports:
+      - "9121:9121"
+    depends_on:
+      - redis
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:latest
+    environment:
+      DATA_SOURCE_NAME: postgresql://prefect:prefect@postgres:5432/credit_db?sslmode=disable
+    ports:
+      - "9187:9187"
+    depends_on:
+      - postgres
+
+  langfuse:
+    image: langfuse/langfuse:latest
+    environment:
+      DATABASE_URL: postgresql://prefect:prefect@postgres:5432/credit_db
+      NEXTAUTH_SECRET: changeme
+      SALT: changeme
+      NEXTAUTH_URL: http://localhost:3001
+    ports:
+      - "3001:3000"
+    depends_on:
+      - postgres
+
+volumes:
+  platform_pgdata:
+  grafana_data:
