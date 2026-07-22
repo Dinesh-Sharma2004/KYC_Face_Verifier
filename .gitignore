@@ -1,0 +1,63 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Node and package caches
+node_modules/
+.npm-cache/
+.pnpm-store/
+dist/
+build/
+
+# Local runtime data
+*.log
+uploads/
+processed_output/
+data/incoming/
+data/processed/
+data/failed/
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*gcp*key*.json
+my-gcp-key.json
+
+# Generated extraction outputs
+full_ocr_results.json
+verification_output.json
+extracted_data_only.json
+user_profile_*.json
+customer_kyc_ledger.json
+
+# Large local artifacts
+*.zip
+*.pkl
+*.pt
+mlruns/
+Karnataka/
+test_images/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
