@@ -14,6 +14,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Integer,
+    LargeBinary,
     String,
     Table,
     Text,
@@ -153,6 +154,7 @@ class Document(Base):
     content_type: Mapped[str] = mapped_column(String, nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256: Mapped[str] = mapped_column(String, nullable=False)
+    file_content: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     current_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     metadata_json: Mapped[Dict[str, Any]] = mapped_column("metadata", JSONType, default=dict, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
@@ -160,27 +162,7 @@ class Document(Base):
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     job = relationship("VerificationJob", back_populates="documents")
-    versions = relationship("DocumentVersion", back_populates="document", cascade="all, delete-orphan")
 
-
-class DocumentVersion(Base):
-    __tablename__ = "document_versions"
-
-    id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
-    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
-    document_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
-    storage_provider: Mapped[str] = mapped_column(String, nullable=False)
-    storage_bucket: Mapped[str] = mapped_column(String, nullable=False)
-    storage_key: Mapped[str] = mapped_column(String, nullable=False)
-    content_type: Mapped[str] = mapped_column(String, nullable=False)
-    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
-    sha256: Mapped[str] = mapped_column(String, nullable=False)
-    is_current: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
-    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    document = relationship("Document", back_populates="versions")
 
 
 class OcrResult(Base):
@@ -190,7 +172,6 @@ class OcrResult(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     document_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=False)
-    document_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, ForeignKey("document_versions.id"), nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False)
     engine: Mapped[str] = mapped_column(String, nullable=False)
     engine_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)

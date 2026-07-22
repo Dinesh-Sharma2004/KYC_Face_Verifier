@@ -36,8 +36,7 @@ from ai_platform.db.models import (
     AuditLog,
     Document,
     DocumentRole,
-    DocumentVersion,
-    FaceResult,
+        FaceResult,
     JobStatus,
     ProcessingEvent,
     User,
@@ -48,7 +47,6 @@ from ai_platform.db.models import (
 )
 from ai_platform.db.session import get_db, init_db
 from ai_platform.services.face_worker import perform_face_verification
-from ai_platform.storage.client import get_storage_client
 
 logger = logging.getLogger("kyc.gateway")
 
@@ -315,8 +313,39 @@ def notify_job_subscribers(job_id: str, event_data: Dict[str, Any]):
 
 
 @app.get("/health")
-def health_check():
-    return {"status": "ok", "service": "kyc-gateway", "version": "4.5.0", "timestamp": datetime.now(timezone.utc).isoformat()}
+def health_check(db: Session = Depends(get_db)):
+    health_status = "healthy"
+    details = {}
+    
+    # Check PostgreSQL
+    try:
+        from sqlalchemy import text
+        db.execute(text("SELECT 1"))
+        details["database"] = "connected"
+    except Exception as e:
+        health_status = "unhealthy"
+        details["database"] = f"disconnected: {e}"
+        
+    # Check Redis
+    try:
+        from redis import Redis
+        redis_conn = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+        if redis_conn.ping():
+            details["redis"] = "connected"
+        else:
+            health_status = "unhealthy"
+            details["redis"] = "ping_failed"
+    except Exception as e:
+        health_status = "unhealthy"
+        details["redis"] = f"disconnected: {e}"
+
+    return {
+        "status": health_status,
+        "details": details,
+        "service": "kyc-gateway",
+        "version": "4.5.0",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
 
 
 @app.get("/metrics")
@@ -413,12 +442,7 @@ async def upload_document(
         raise HTTPException(status_code=400, detail="Empty document file")
 
     sha256_hash = hashlib.sha256(content).hexdigest()
-    storage = get_storage_client()
-    bucket = "kyc-documents"
     doc_uuid = uuid.uuid4()
-    storage_key = f"{current_user_id}/{job_id}/{doc_uuid}.{file.filename.split('.')[-1] if '.' in file.filename else 'bin'}"
-
-    storage.put_object(bucket, storage_key, content, file.content_type or "application/octet-stream")
 
     doc_role = DocumentRole.PRIMARY if role.lower() == "primary" else DocumentRole.SUPPORTING
     doc = Document(
@@ -431,35 +455,16 @@ async def upload_document(
         content_type=file.content_type or "application/octet-stream",
         size_bytes=len(content),
         sha256=sha256_hash,
+        file_content=content
     )
     db.add(doc)
     db.commit()
     db.refresh(doc)
-
-    doc_ver = DocumentVersion(
-        user_id=current_user_id,
-        document_id=doc.id,
-        version=1,
-        storage_provider="s3",
-        storage_bucket=bucket,
-        storage_key=storage_key,
-        content_type=doc.content_type,
-        size_bytes=doc.size_bytes,
-        sha256=sha256_hash,
-    )
-    db.add(doc_ver)
-
     evt = ProcessingEvent(
         user_id=current_user_id,
         job_id=job.id,
         event_type="document.uploaded",
-        producer="document-service",
-        payload={
-            "document_id": str(doc.id),
-            "filename": file.filename,
-            "role": role,
-            "size_bytes": len(content),
-        },
+        event_data={"document_id": str(doc.id), "role": doc.role.value, "size_bytes": doc.size_bytes},
     )
     db.add(evt)
     db.commit()
@@ -496,9 +501,6 @@ def run_async_verification_pipeline(job_id_str: str, current_user_id_str: str):
         if not job:
             return
 
-        storage = get_storage_client()
-        bucket = "kyc-documents"
-
         job.status = JobStatus.FACE_VERIFICATION
         db.commit()
         notify_job_subscribers(job_id_str, {"event_type": "face.started", "status": "face_verification"})
@@ -508,15 +510,7 @@ def run_async_verification_pipeline(job_id_str: str, current_user_id_str: str):
         secondary_bytes = None
 
         for doc in docs:
-            version = db.query(DocumentVersion).filter(DocumentVersion.document_id == doc.id).first()
-            key = version.storage_key if version else f"{job_id_str}/{doc.role.value}/{doc.original_filename}"
-
-            try:
-                doc_bytes = storage.get_object(bucket, key)
-            except Exception as ex:
-                logger.error("Failed to read document from storage key %s: %s", key, str(ex))
-                doc_bytes = b""
-
+            doc_bytes = doc.file_content
             if doc.role == DocumentRole.PRIMARY:
                 primary_bytes = doc_bytes
             else:
