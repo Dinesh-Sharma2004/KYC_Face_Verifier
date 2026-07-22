@@ -117,7 +117,7 @@ class VerificationJob(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
     tenant_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, nullable=True)
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     external_reference: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     status: Mapped[JobStatus] = mapped_column(Enum(JobStatus), default=JobStatus.QUEUED, nullable=False)
     status_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -143,9 +143,9 @@ class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     tenant_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, nullable=True)
-    uploaded_by: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=True)
     role: Mapped[DocumentRole] = mapped_column(Enum(DocumentRole), nullable=False)
     document_type_hint: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     detected_document_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -167,6 +167,7 @@ class DocumentVersion(Base):
     __tablename__ = "document_versions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     document_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     storage_provider: Mapped[str] = mapped_column(String, nullable=False)
@@ -186,6 +187,7 @@ class OcrResult(Base):
     __tablename__ = "ocr_results"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     document_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=False)
     document_version_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, ForeignKey("document_versions.id"), nullable=True)
@@ -206,6 +208,7 @@ class FaceResult(Base):
     __tablename__ = "face_results"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     primary_document_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=False)
     secondary_document_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=True)
@@ -225,6 +228,7 @@ class VerificationResult(Base):
     __tablename__ = "verification_results"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     decision: Mapped[VerificationDecision] = mapped_column(Enum(VerificationDecision), nullable=False)
     overall_score: Mapped[float] = mapped_column(Float, nullable=False)
@@ -245,7 +249,7 @@ class AuditLog(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
     tenant_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, nullable=True)
-    user_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, nullable=True)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     action: Mapped[str] = mapped_column(String, nullable=False)
     resource_type: Mapped[str] = mapped_column(String, nullable=False)
     resource_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -259,6 +263,7 @@ class ProcessingEvent(Base):
     __tablename__ = "processing_events"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     producer: Mapped[str] = mapped_column(String, nullable=False)
@@ -273,6 +278,7 @@ class ExtractedEntity(Base):
     __tablename__ = "extracted_entities"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     document_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=False)
     document_type: Mapped[str] = mapped_column(String, nullable=False)
@@ -285,6 +291,7 @@ class NormalizedEntity(Base):
     __tablename__ = "normalized_entities"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     document_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("documents.id"), nullable=False)
     extracted_entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUIDType, ForeignKey("extracted_entities.id"), nullable=True)
@@ -296,6 +303,7 @@ class VerificationScore(Base):
     __tablename__ = "verification_scores"
 
     id: Mapped[uuid.UUID] = mapped_column(UUIDType, primary_key=True, default=gen_uuid)
+    user_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("users.id"), nullable=False)
     job_id: Mapped[uuid.UUID] = mapped_column(UUIDType, ForeignKey("verification_jobs.id"), nullable=False)
     verdict: Mapped[str] = mapped_column(String, nullable=False)
     final_score: Mapped[float] = mapped_column(Float, nullable=False)

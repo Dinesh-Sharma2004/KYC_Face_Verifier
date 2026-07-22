@@ -168,6 +168,41 @@ def _set_secure_cookie(response: Response, name: str, value: str, max_age: int) 
     )
 
 
+
+def get_current_user_id(request: Request, response: Response, db: Session = Depends(get_db)) -> uuid.UUID:
+    session = request.cookies.get(ADMIN_SESSION_COOKIE) or _bearer_token(request.headers.get("authorization"))
+    if session:
+        try:
+            purpose, subject, _, _ = session.split(".", 3)
+            if purpose in ("admin", "user") and _verify_token(session, purpose, subject):
+                return uuid.UUID(subject)
+        except Exception:
+            pass
+    
+    user = User(role="guest", email=f"guest_{uuid.uuid4().hex[:8]}@kyc.local")
+    db.add(user)
+    db.commit()
+    new_session = _sign_token("user", str(user.id), 86400 * 30)
+    _set_secure_cookie(response, ADMIN_SESSION_COOKIE, new_session, 86400 * 30)
+    return user.id
+
+def get_current_user_id(request: Request, response: Response, db: Session = Depends(get_db)) -> uuid.UUID:
+    session = request.cookies.get(ADMIN_SESSION_COOKIE) or _bearer_token(request.headers.get("authorization"))
+    if session:
+        try:
+            purpose, subject, _, _ = session.split(".", 3)
+            if purpose in ("admin", "user") and _verify_token(session, purpose, subject):
+                return uuid.UUID(subject)
+        except Exception:
+            pass
+    user = User(role="guest", email=f"guest_{uuid.uuid4().hex[:8]}@kyc.local")
+    db.add(user)
+    db.commit()
+    new_session = _sign_token("user", str(user.id), 86400 * 30)
+    _set_secure_cookie(response, ADMIN_SESSION_COOKIE, new_session, 86400 * 30)
+    return user.id
+
+
 def issue_job_cookie(response: Response, job_id: str) -> None:
     _set_secure_cookie(response, JOB_TOKEN_COOKIE, _sign_token("job", job_id, JOB_TOKEN_TTL_SECONDS), JOB_TOKEN_TTL_SECONDS)
 
@@ -320,9 +355,10 @@ def login(request: LoginRequest, response: Response, db: Session = Depends(get_d
 
 @app.post("/api/v1/jobs", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
 @app.post("/api/v1/jobs/", response_model=JobResponse, status_code=status.HTTP_201_CREATED)
-def create_job(response: Response, req: Optional[JobCreateRequest] = None, db: Session = Depends(get_db)):
+def create_job(response: Response, req: Optional[JobCreateRequest] = None, db: Session = Depends(get_db), current_user_id: uuid.UUID = Depends(get_current_user_id)):
     ref = req.external_reference if req else f"FACE-JOB-{int(datetime.now().timestamp())}"
     job = VerificationJob(
+        user_id=current_user_id,
         external_reference=ref,
         status=JobStatus.QUEUED,
     )
@@ -331,6 +367,7 @@ def create_job(response: Response, req: Optional[JobCreateRequest] = None, db: S
     db.refresh(job)
 
     evt = ProcessingEvent(
+        user_id=current_user_id,
         job_id=job.id,
         event_type="job.created",
         producer="gateway",
@@ -358,6 +395,7 @@ async def upload_document(
     role: str = Form("primary"),
     document_type_hint: Optional[str] = Form(None),
     db: Session = Depends(get_db),
+    current_user_id: uuid.UUID = Depends(get_current_user_id),
 ):
     try:
         job_uuid = uuid.UUID(job_id)
@@ -366,7 +404,7 @@ async def upload_document(
 
     require_job_access(job_id, request)
 
-    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid).first()
+    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid, VerificationJob.user_id == current_user_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -377,12 +415,15 @@ async def upload_document(
     sha256_hash = hashlib.sha256(content).hexdigest()
     storage = get_storage_client()
     bucket = "kyc-documents"
-    storage_key = f"{job_id}/{role}/{file.filename}"
+    doc_uuid = uuid.uuid4()
+    storage_key = f"{current_user_id}/{job_id}/{doc_uuid}.{file.filename.split('.')[-1] if '.' in file.filename else 'bin'}"
 
     storage.put_object(bucket, storage_key, content, file.content_type or "application/octet-stream")
 
     doc_role = DocumentRole.PRIMARY if role.lower() == "primary" else DocumentRole.SUPPORTING
     doc = Document(
+        id=doc_uuid,
+        user_id=current_user_id,
         job_id=job.id,
         role=doc_role,
         document_type_hint=document_type_hint,
@@ -396,6 +437,7 @@ async def upload_document(
     db.refresh(doc)
 
     doc_ver = DocumentVersion(
+        user_id=current_user_id,
         document_id=doc.id,
         version=1,
         storage_provider="s3",
@@ -408,6 +450,7 @@ async def upload_document(
     db.add(doc_ver)
 
     evt = ProcessingEvent(
+        user_id=current_user_id,
         job_id=job.id,
         event_type="document.uploaded",
         producer="document-service",
@@ -442,14 +485,14 @@ async def upload_document(
     )
 
 
-def run_async_verification_pipeline(job_id_str: str):
+def run_async_verification_pipeline(job_id_str: str, current_user_id_str: str):
     """Forensic 3-Model Ensemble (ArcFace + FaceNet512 + Buffalo_L) Verification Pipeline."""
     from ai_platform.db.session import SessionLocal
 
     db = SessionLocal()
     try:
         job_uuid = uuid.UUID(job_id_str)
-        job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid).first()
+        job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid, VerificationJob.user_id == current_user_id).first()
         if not job:
             return
 
@@ -460,7 +503,7 @@ def run_async_verification_pipeline(job_id_str: str):
         db.commit()
         notify_job_subscribers(job_id_str, {"event_type": "face.started", "status": "face_verification"})
 
-        docs = db.query(Document).filter(Document.job_id == job.id).all()
+        docs = db.query(Document).filter(Document.job_id == job.id, Document.user_id == current_user_id).all()
         primary_bytes = None
         secondary_bytes = None
 
@@ -497,7 +540,7 @@ def run_async_verification_pipeline(job_id_str: str):
         primary_doc = [d for d in docs if d.role == DocumentRole.PRIMARY]
         primary_doc_id = primary_doc[0].id if primary_doc else docs[0].id
 
-        face_res = FaceResult(
+        face_res = FaceResult(user_id=uuid.UUID(current_user_id_str), 
             job_id=job.id,
             primary_document_id=primary_doc_id,
             status="completed" if faces_count > 0 else "no_face",
@@ -528,7 +571,7 @@ def run_async_verification_pipeline(job_id_str: str):
             "verified_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        verif_res = VerificationResult(
+        verif_res = VerificationResult(user_id=uuid.UUID(current_user_id_str), 
             job_id=job.id,
             decision=decision,
             overall_score=similarity_score / 100.0,
@@ -538,7 +581,7 @@ def run_async_verification_pipeline(job_id_str: str):
         )
         db.add(verif_res)
 
-        score_rec = VerificationScore(
+        score_rec = VerificationScore(user_id=uuid.UUID(current_user_id_str), 
             job_id=job.id,
             verdict=verdict_str,
             final_score=similarity_score,
@@ -549,7 +592,7 @@ def run_async_verification_pipeline(job_id_str: str):
         job.status = JobStatus.COMPLETED
         job.completed_at = datetime.now(timezone.utc)
 
-        audit_comp = AuditLog(
+        audit_comp = AuditLog(user_id=uuid.UUID(current_user_id_str), 
             action="FORENSIC_FACE_VERIFICATION_COMPLETED",
             resource_type="verification_job",
             resource_id=job_id_str,
@@ -607,6 +650,7 @@ def trigger_job_processing(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    current_user_id: uuid.UUID = Depends(get_current_user_id),
 ):
     try:
         job_uuid = uuid.UUID(job_id)
@@ -615,7 +659,7 @@ def trigger_job_processing(
 
     require_job_access(job_id, request)
 
-    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid).first()
+    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid, VerificationJob.user_id == current_user_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
@@ -623,12 +667,24 @@ def trigger_job_processing(
     job.started_at = datetime.now(timezone.utc)
     db.commit()
 
-    background_tasks.add_task(run_async_verification_pipeline, job_id)
+    try:
+        from redis import Redis
+        from rq import Queue
+        redis_conn = Redis.from_url(os.getenv("REDIS_URL", "redis://localhost:6379"))
+        q = Queue("face_tasks", connection=redis_conn)
+        q.enqueue("ai_platform.services.face_worker.process_face_verification_job", job_id, str(current_user_id), job_timeout=600)
+    except ImportError:
+        logger.warning("rq not installed, falling back to background_tasks")
+        background_tasks.add_task(run_async_verification_pipeline, job_id, str(current_user_id))
+    except Exception as e:
+        logger.error(f"Redis enqueue failed: {e}")
+        background_tasks.add_task(run_async_verification_pipeline, job_id, str(current_user_id))
+
     return {"status": "processing_started", "job_id": job_id}
 
 
 @app.get("/api/v1/jobs/{job_id}")
-def get_job_status(job_id: str, request: Request, db: Session = Depends(get_db)):
+def get_job_status(job_id: str, request: Request, db: Session = Depends(get_db), current_user_id: uuid.UUID = Depends(get_current_user_id)):
     try:
         job_uuid = uuid.UUID(job_id)
     except ValueError:
@@ -636,11 +692,11 @@ def get_job_status(job_id: str, request: Request, db: Session = Depends(get_db))
 
     require_job_access(job_id, request)
 
-    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid).first()
+    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid, VerificationJob.user_id == current_user_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    docs = db.query(Document).filter(Document.job_id == job.id).all()
+    docs = db.query(Document).filter(Document.job_id == job.id, Document.user_id == current_user_id).all()
     doc_list = [
         {
             "document_id": str(d.id),
@@ -665,7 +721,7 @@ def get_job_status(job_id: str, request: Request, db: Session = Depends(get_db))
 
 @app.get("/api/v1/jobs/{job_id}/face-debug-gallery")
 @app.get("/jobs/{job_id}/face-debug-gallery")
-def get_job_face_debug_gallery(job_id: str, request: Request, db: Session = Depends(get_db)):
+def get_job_face_debug_gallery(job_id: str, request: Request, db: Session = Depends(get_db), current_user_id: uuid.UUID = Depends(get_current_user_id)):
     """Phase 1: Expose visual debug gallery containing original crops, bounding box overlays, aligned face crops, and pose landmarks."""
     if not FACE_DEBUG_ENDPOINTS_ENABLED:
         raise HTTPException(status_code=404, detail="Face debug gallery is disabled")
@@ -677,7 +733,7 @@ def get_job_face_debug_gallery(job_id: str, request: Request, db: Session = Depe
 
     require_job_access(job_id, request)
 
-    result = db.query(VerificationResult).filter(VerificationResult.job_id == job_uuid).first()
+    result = db.query(VerificationResult).filter(VerificationResult.job_id == job_uuid, VerificationResult.user_id == current_user_id).first()
     if not result:
         raise HTTPException(status_code=404, detail="Debug gallery not ready or job not found")
 
@@ -707,7 +763,7 @@ def get_job_face_debug_gallery(job_id: str, request: Request, db: Session = Depe
 
 @app.get("/api/v1/jobs/{job_id}/face-debug")
 @app.get("/jobs/{job_id}/face-debug")
-def get_job_face_debug(job_id: str, request: Request, db: Session = Depends(get_db)):
+def get_job_face_debug(job_id: str, request: Request, db: Session = Depends(get_db), current_user_id: uuid.UUID = Depends(get_current_user_id)):
     if not FACE_DEBUG_ENDPOINTS_ENABLED:
         raise HTTPException(status_code=404, detail="Face debug endpoint is disabled")
 
@@ -718,7 +774,7 @@ def get_job_face_debug(job_id: str, request: Request, db: Session = Depends(get_
 
     require_job_access(job_id, request)
 
-    result = db.query(VerificationResult).filter(VerificationResult.job_id == job_uuid).first()
+    result = db.query(VerificationResult).filter(VerificationResult.job_id == job_uuid, VerificationResult.user_id == current_user_id).first()
     if not result:
         raise HTTPException(status_code=404, detail="Face debug data not ready or job not found")
 
@@ -749,7 +805,7 @@ def get_job_face_debug(job_id: str, request: Request, db: Session = Depends(get_
 
 @app.get("/api/v1/jobs/{job_id}/result")
 @app.get("/api/v1/jobs/{job_id}/face-verification")
-def get_job_face_verification_result(job_id: str, request: Request, db: Session = Depends(get_db)):
+def get_job_face_verification_result(job_id: str, request: Request, db: Session = Depends(get_db), current_user_id: uuid.UUID = Depends(get_current_user_id)):
     try:
         job_uuid = uuid.UUID(job_id)
     except ValueError:
@@ -757,7 +813,7 @@ def get_job_face_verification_result(job_id: str, request: Request, db: Session 
 
     require_job_access(job_id, request)
 
-    result = db.query(VerificationResult).filter(VerificationResult.job_id == job_uuid).first()
+    result = db.query(VerificationResult).filter(VerificationResult.job_id == job_uuid, VerificationResult.user_id == current_user_id).first()
     if not result:
         raise HTTPException(status_code=404, detail="Face verification result not ready or job not found")
 
@@ -771,7 +827,7 @@ def get_job_face_verification_result(job_id: str, request: Request, db: Session 
 
 
 @app.get("/api/v1/jobs/{job_id}/events/stream")
-async def sse_event_stream(job_id: str, request: Request, db: Session = Depends(get_db)):
+async def sse_event_stream(job_id: str, request: Request, db: Session = Depends(get_db), current_user_id: uuid.UUID = Depends(get_current_user_id)):
     try:
         job_uuid = uuid.UUID(job_id)
     except ValueError:
@@ -779,7 +835,7 @@ async def sse_event_stream(job_id: str, request: Request, db: Session = Depends(
 
     require_job_access(job_id, request)
 
-    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid).first()
+    job = db.query(VerificationJob).filter(VerificationJob.id == job_uuid, VerificationJob.user_id == current_user_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 

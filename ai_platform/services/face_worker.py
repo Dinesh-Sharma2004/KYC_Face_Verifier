@@ -25,6 +25,47 @@ MODEL_WEIGHTS = {
 FACE_MATCH_THRESHOLDS = MODEL_THRESHOLDS
 
 
+# ---------------------------------------------------------------------
+# Phase 5: Free-Tier Eager Memory Eager Loading Optimization
+# ---------------------------------------------------------------------
+# Load ML meta-classifier and DeepFace models ONCE globally at worker 
+# startup to prevent 800MB+ memory spikes per-request in production.
+_META_CLASSIFIER_CACHE = None
+_DEEPFACE_MODELS_CACHE = {}
+
+def preload_models_for_free_tier():
+    global _META_CLASSIFIER_CACHE
+    logger.info("Starting Phase 5 Model Pre-loading...")
+    try:
+        import joblib
+        from deepface import DeepFace
+        from deepface.modules import modeling
+
+        # 1. Load Scikit-Learn Meta-Classifier
+        model_path = os.path.join(os.path.dirname(__file__), "best_face_verification_model.pkl")
+        if os.path.exists(model_path):
+            _META_CLASSIFIER_CACHE = joblib.load(model_path)
+            logger.info("Meta-classifier loaded into RAM successfully.")
+        
+        # 2. Pre-load Heavy DeepFace Models into Memory
+        # Instead of dynamically loading them during represent()
+        for m_name in ["ArcFace", "Facenet512", "VGG-Face"]:
+            try:
+                # DeepFace internal builder caches to RAM
+                model = modeling.build_model(m_name)
+                _DEEPFACE_MODELS_CACHE[m_name] = model
+                logger.info(f"Pre-loaded {m_name} into RAM successfully.")
+            except Exception as e:
+                logger.warning(f"Failed to pre-load {m_name}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Critical error during model preloading: {e}")
+
+# Trigger the pre-load immediately when worker process boots
+preload_models_for_free_tier()
+# ---------------------------------------------------------------------
+
+
 def audit_rgb_conversion(image_bgr: Any) -> Any:
     """Phase 4: Explicit BGR -> RGB validation."""
     import cv2
@@ -467,14 +508,16 @@ def perform_ml_ensemble_verification(
         from deepface import DeepFace
         
         # Load meta-classifier
-        model_path = os.path.join(os.path.dirname(__file__), "best_face_verification_model.pkl")
-        meta = joblib.load(model_path)
+        meta = _META_CLASSIFIER_CACHE
+        if not meta:
+            model_path = os.path.join(os.path.dirname(__file__), "best_face_verification_model.pkl")
+            meta = joblib.load(model_path)
         clf = meta["model"]
         
         # Pipeline in sklearn might already have scaler inside it. Let's check metadata for a separate scaler.
         scaler = meta.get("scaler")
         thresholds = meta.get("thresholds_per_model", {})
-        models_used = meta.get("models_used", ["VGG-Face", "Facenet", "Facenet512", "ArcFace"])
+        models_used = meta.get("models_used", ["VGG-Face", "Facenet512", "ArcFace"])
         
         features = []
         distances = {}
@@ -552,3 +595,38 @@ def perform_face_verification(
 ) -> Dict[str, Any]:
     """Main verification entry point."""
     return perform_ml_ensemble_verification(primary_bytes, secondary_bytes)
+
+
+def process_face_verification_job(job_id: str, current_user_id: str):
+    """
+    Phase 4: Redis Queue Background Task Entry Point
+    This function is executed by the rq worker daemon.
+    It calls the gateway's run_async_verification_pipeline which will use our pre-loaded models.
+    """
+    import asyncio
+    from ai_platform.services.gateway import run_async_verification_pipeline
+    logger.info(f"Worker picked up job {job_id} for user {current_user_id}")
+    
+    # run_async_verification_pipeline is asynchronous in gateway?
+    # Wait, in gateway.py, run_async_verification_pipeline is NOT async. It's a normal `def`.
+    # Let's just call it.
+    run_async_verification_pipeline(job_id, current_user_id)
+    logger.info(f"Worker finished job {job_id}")
+
+
+if __name__ == "__main__":
+    import os
+    import sys
+    from redis import Redis
+    from rq import Worker, Queue, Connection
+    
+    logger.setLevel(logging.INFO)
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+    
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379")
+    redis_conn = Redis.from_url(redis_url)
+    
+    logger.info("Starting Face Verification Redis Worker Daemon...")
+    with Connection(redis_conn):
+        worker = Worker(["face_tasks"])
+        worker.work()
