@@ -11,6 +11,10 @@ DATABASE_URL = os.getenv(
     "sqlite:///:memory:"
 )
 
+# Raise error if accidentally set to Redis
+if DATABASE_URL.startswith(("redis://", "rediss://")):
+    raise RuntimeError("DATABASE_URL points to Redis. Expected PostgreSQL.")
+
 # Convert postgres:// to postgresql:// if needed for SQLAlchemy 2.0
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)

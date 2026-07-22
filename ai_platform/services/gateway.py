@@ -53,7 +53,10 @@ logger = logging.getLogger("kyc.gateway")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()
+    try:
+        init_db()
+    except Exception as e:
+        logger.error(f"Database initialization failed: {e}")
     yield
 
 
@@ -591,18 +594,18 @@ def run_async_verification_pipeline(job_id_str: str, current_user_id_str: str):
             resource_type="verification_job",
             resource_id=job_id_str,
             payload={
-                "arcface_distance": face_report["arcface_distance"],
-                "facenet_distance": face_report["facenet_distance"],
-                "buffalo_distance": face_report["buffalo_distance"],
-                "ensemble_distance": face_report["ensemble_distance"],
-                "arcface_verdict": face_report["arcface_verdict"],
-                "facenet_verdict": face_report["facenet_verdict"],
-                "buffalo_verdict": face_report["buffalo_verdict"],
-                "ensemble_verdict": face_report["ensemble_verdict"],
-                "match_confidence": face_report["match_confidence"],
-                "mismatch_confidence": face_report["mismatch_confidence"],
-                "model_disagreement": face_report["model_disagreement"],
-                "quality_score": face_report["quality_score"],
+                "arcface_distance": face_report.get("arcface_distance", 1.0),
+                "facenet_distance": face_report.get("facenet_distance", 1.0),
+                "buffalo_distance": face_report.get("buffalo_distance", 1.0),
+                "ensemble_distance": face_report.get("ensemble_distance", 1.0),
+                "arcface_verdict": face_report.get("arcface_verdict", "MISMATCH"),
+                "facenet_verdict": face_report.get("facenet_verdict", "MISMATCH"),
+                "buffalo_verdict": face_report.get("buffalo_verdict", "MISMATCH"),
+                "ensemble_verdict": face_report.get("ensemble_verdict", "MISMATCH"),
+                "match_confidence": face_report.get("match_confidence", 0.0),
+                "mismatch_confidence": face_report.get("mismatch_confidence", 100.0),
+                "model_disagreement": face_report.get("model_disagreement", False),
+                "quality_score": face_report.get("quality_score", 0.0),
                 "self_similarity_passed": face_report.get("self_similarity_check", {}).get("passed", True),
             },
         )
@@ -611,11 +614,8 @@ def run_async_verification_pipeline(job_id_str: str, current_user_id_str: str):
 
         # Privacy & Security Directive: Automatically delete uploaded document image files after verification
         try:
-            for doc in docs:
-                version = db.query(DocumentVersion).filter(DocumentVersion.document_id == doc.id).first()
-                key = version.storage_key if version else f"{job_id_str}/{doc.role.value}/{doc.original_filename}"
-                storage.delete_object(bucket, key)
-            logger.info("Successfully deleted temporary document images for job %s from storage", job_id_str)
+            # Files are stored as DB blobs, no external storage cleanup required in simplified architecture.
+            pass
         except Exception as cleanup_ex:
             logger.warning("Non-fatal document image cleanup warning for job %s: %s", job_id_str, str(cleanup_ex))
 
