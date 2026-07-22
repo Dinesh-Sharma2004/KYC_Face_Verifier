@@ -2,7 +2,7 @@
   "name": "kyc-verification-frontend",
   "private": true,
   "version": "1.0.0",
-  "homepage": "https://Dinesh-Sharma2004.github.io/CodeRunner",
+  "homepage": "https://Dinesh-Sharma2004.github.io/KYC_Face_Verifier",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
